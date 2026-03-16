@@ -1,97 +1,135 @@
 export default async function handler(req, res) {
-  // Only allow POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   const { url } = req.body;
+  if (!url) return res.status(400).json({ error: "URL is required" });
 
-  if (!url) {
-    return res.status(400).json({ error: "URL is required" });
-  }
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const headers = {
+    "Content-Type": "application/json",
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "web-search-2025-03-05",
+  };
 
-  // Step 1: Fetch the actual website content
-  let siteContent = "";
   try {
-    const siteRes = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; MarketerAI/1.0)" },
-      signal: AbortSignal.timeout(8000),
+    // ── STEP 1: Use Claude with web_search to deeply research the company ──
+    const researchResponse = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 2000,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages: [{
+          role: "user",
+          content: `Please research this company thoroughly by searching the web: ${url}
+
+Search for:
+1. Their homepage and about page to understand exactly what they do
+2. Their specific products or services with real details
+3. Their target customers and unique value proposition
+4. Any notable features, pricing, or differentiators
+
+After searching, write a detailed company brief (200-300 words) covering:
+- Exact company name
+- Precisely what they do (be specific, not vague)
+- Their specific products/services with names and details
+- Target audience
+- Key differentiators and value props
+- Tone and brand voice from their site
+
+Be very specific. Do NOT be generic. Use the actual content you find.`
+        }],
+      }),
     });
-    const html = await siteRes.text();
-    // Strip HTML tags and collapse whitespace for a clean text extract
-    siteContent = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 3000); // Keep first 3000 chars — enough context
-  } catch (e) {
-    console.warn("Could not fetch site, falling back to URL inference:", e.message);
-  }
 
-  const prompt = `You are an expert marketing strategist and copywriter.
+    if (!researchResponse.ok) {
+      const err = await researchResponse.text();
+      console.error("Research step failed:", err);
+      return res.status(500).json({ error: "AI research failed" });
+    }
 
-A user wants a marketing campaign for this company: ${url}
+    const researchData = await researchResponse.json();
 
-${siteContent
-  ? `Here is the actual text content scraped from their website:\n"""\n${siteContent}\n"""\n\nUse this real content to accurately describe what the company does.`
-  : `We could not fetch the website. Infer the company name, industry, and offerings from the URL itself.`
-}
+    // Extract the text summary Claude wrote after searching
+    const companyBrief = researchData.content
+      .filter(b => b.type === "text")
+      .map(b => b.text)
+      .join("\n")
+      .trim();
 
-Generate a complete marketing content package. Return ONLY valid JSON (no markdown, no explanation) in this exact format:
+    if (!companyBrief) {
+      return res.status(500).json({ error: "Could not research company" });
+    }
 
-{
-  "companyName": "the company's real name",
-  "tagline": "a punchy one-line brand tagline you created",
-  "social": {
-    "Twitter": "A punchy tweet under 280 chars with 2-3 relevant hashtags. Hook-first, high-energy.",
-    "LinkedIn": "A professional LinkedIn post (150-200 words). Lead with an insight or stat, then connect to the company's value, end with a question to drive engagement.",
-    "Instagram": "A vivid, visual Instagram caption (100-130 words) with strong emojis and 5 hashtags at the end."
-  },
-  "email": {
-    "subject": "A compelling email subject line (under 60 chars, curiosity-driven)",
-    "body": "A full marketing email (200-250 words). Include: a strong opening hook, 2-3 benefit-driven paragraphs, a clear CTA button text in [brackets], and a P.S. line."
-  },
-  "blog": {
-    "title": "An SEO-optimized blog post title (under 70 chars, includes a power word)",
-    "intro": "A gripping 2-sentence intro paragraph that hooks the reader and sets up the problem.",
-    "sections": [
-      {"heading": "Section 1 heading", "body": "2-3 sentence section body"},
-      {"heading": "Section 2 heading", "body": "2-3 sentence section body"},
-      {"heading": "Section 3 heading", "body": "2-3 sentence section body"}
-    ],
-    "cta": "A compelling closing call-to-action paragraph (1-2 sentences)"
-  }
-}`;
-
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    // ── STEP 2: Generate the full marketing campaign using the research ──
+    const campaignResponse = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 1500,
-        messages: [{ role: "user", content: prompt }],
+        max_tokens: 2000,
+        messages: [{
+          role: "user",
+          content: `You are an expert marketing strategist and copywriter.
+
+Here is a detailed research brief about the company you are writing for:
+
+"""
+${companyBrief}
+"""
+
+Using ONLY the specific details above (real product names, real features, real audience), generate a complete marketing content package. Be highly specific — mention actual product/service names, real use cases, and concrete benefits. Avoid all generic marketing fluff.
+
+Return ONLY valid JSON (no markdown, no explanation) in this exact format:
+
+{
+  "companyName": "exact company name",
+  "tagline": "a punchy one-line tagline specific to what they actually do",
+  "social": {
+    "Twitter": "A punchy tweet under 280 chars with 2-3 relevant hashtags. Reference their actual product/service specifically.",
+    "LinkedIn": "A professional LinkedIn post (150-200 words). Reference specific features or benefits from the research. End with an engaging question.",
+    "Instagram": "A vivid Instagram caption (100-130 words) with emojis and 5 relevant hashtags. Be specific to their niche."
+  },
+  "email": {
+    "subject": "A subject line under 60 chars that references what they specifically offer",
+    "body": "A full marketing email (200-250 words) mentioning their specific products/services, real benefits, a CTA in [brackets], and a P.S. line."
+  },
+  "blog": {
+    "title": "An SEO blog title under 70 chars specific to their industry and offering",
+    "intro": "2-sentence hook that speaks directly to their target audience's real pain point.",
+    "sections": [
+      {"heading": "Specific section heading", "body": "2-3 sentences with specific details from the research"},
+      {"heading": "Specific section heading", "body": "2-3 sentences with specific details from the research"},
+      {"heading": "Specific section heading", "body": "2-3 sentences with specific details from the research"}
+    ],
+    "cta": "1-2 sentence CTA specific to their product/service."
+  }
+}`
+        }],
       }),
     });
 
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("Anthropic API error:", err);
-      return res.status(500).json({ error: "AI generation failed" });
+    if (!campaignResponse.ok) {
+      const err = await campaignResponse.text();
+      console.error("Campaign generation failed:", err);
+      return res.status(500).json({ error: "Campaign generation failed" });
     }
 
-    const data = await response.json();
-    const text = data.content?.map(b => b.text || "").join("") || "";
-    const clean = text.replace(/```json|```/g, "").trim();
+    const campaignData = await campaignResponse.json();
+    const text = campaignData.content?.map(b => b.text || "").join("") || "";
+    const clean = text.replace(/```json[\s\S]*?```|```/g, "").trim();
     const parsed = JSON.parse(clean);
 
     return res.status(200).json(parsed);
+
   } catch (err) {
     console.error("Server error:", err);
     return res.status(500).json({ error: "Something went wrong" });
