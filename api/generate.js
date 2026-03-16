@@ -10,12 +10,39 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "URL is required" });
   }
 
-  const prompt = `You are an expert marketing strategist and copywriter. A user has provided this company URL: "${url}"
+  // Step 1: Fetch the actual website content
+  let siteContent = "";
+  try {
+    const siteRes = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; MarketerAI/1.0)" },
+      signal: AbortSignal.timeout(8000),
+    });
+    const html = await siteRes.text();
+    // Strip HTML tags and collapse whitespace for a clean text extract
+    siteContent = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 3000); // Keep first 3000 chars — enough context
+  } catch (e) {
+    console.warn("Could not fetch site, falling back to URL inference:", e.message);
+  }
 
-Based on the URL (infer the company's name, industry, and likely offerings from the domain), generate a complete marketing content package. Return ONLY valid JSON (no markdown, no explanation) in this exact format:
+  const prompt = `You are an expert marketing strategist and copywriter.
+
+A user wants a marketing campaign for this company: ${url}
+
+${siteContent
+  ? `Here is the actual text content scraped from their website:\n"""\n${siteContent}\n"""\n\nUse this real content to accurately describe what the company does.`
+  : `We could not fetch the website. Infer the company name, industry, and offerings from the URL itself.`
+}
+
+Generate a complete marketing content package. Return ONLY valid JSON (no markdown, no explanation) in this exact format:
 
 {
-  "companyName": "inferred company name",
+  "companyName": "the company's real name",
   "tagline": "a punchy one-line brand tagline you created",
   "social": {
     "Twitter": "A punchy tweet under 280 chars with 2-3 relevant hashtags. Hook-first, high-energy.",
@@ -43,7 +70,7 @@ Based on the URL (infer the company's name, industry, and likely offerings from 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,       // Set this in Vercel dashboard
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
